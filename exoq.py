@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.stats import truncnorm
 import matplotlib.pyplot as pl
+from tqdm import tqdm
 import kplr
 from kplr import KOI
 KOI._id = '{kepid}'
@@ -11,23 +12,31 @@ G = 6.67428e-11
 DAYSEC = 86400.
 HRSEC = 3600.
 KGM3 = 1.e3
+MSUN = 1.988416e30
+RSUN = 6.957e8
 
-def N(mu, sig1, sig2 = None, positive = True):
+def N(mu, sig1, sig2 = None, lo = 0, hi = None):
     '''
     
     '''
     
-    # Loop until positive
+    return mu
+    
+    # Check bounds
+    if hi is None:
+        hi = np.inf
+    if lo is None:
+        lo = -np.inf
+    
+    # Loop until in range
     while True:
-    
         if sig1 is None:
             return mu
         elif sig2 is None:
             res = mu + np.abs(sig1) * np.random.randn()
         else:
             res = mu + 0.5 * (np.abs(sig1) + np.abs(sig2)) * np.random.randn()
-    
-        if (positive and res > 0) or not positive:
+        if (res >= lo) and (res <= hi):
             return res
     
 def GetKOIs():
@@ -95,78 +104,6 @@ def GetKOIs():
     
     return kois
 
-def ImpactDistribution():
-    '''
-    Plot the impact parameter distribution
-    
-    '''
-    
-    kois = GetKOIs()
-    impacts = [k.koi_impact for k in kois]
-    pl.hist(impacts, bins = 30, histtype = 'step', range = (0,1.2))
-    pl.show()
-
-def DrawEccentricity(koi):
-    '''
-    
-    '''
-    
-    # Loop until we get a physical impact parameter
-    while True:
-    
-        # Measured duration in seconds
-        T = HRSEC * N(koi.koi_duration, koi.koi_duration_err1, koi.koi_duration_err2)
-    
-        # Density in kg/m^3
-        rho = KGM3 * N(koi.koi_srho, koi.koi_srho_err1, koi.koi_srho_err2)
-    
-        # Period in seconds
-        per = DAYSEC * N(koi.koi_period, koi.koi_period_err1, koi.koi_period_err2)
-    
-        # Semi-major axis in units of stellar radius
-        aRs = ((G * rho * per ** 2.) / (3. * np.pi)) ** (1. / 3.)
-    
-        # Rp/Rs
-        rprs = N(koi.koi_ror, koi.koi_ror_err1, koi.koi_ror_err2)
-    
-        # Impact parameter
-        b = N(koi.koi_impact, koi.koi_impact_err1, koi.koi_impact_err2)
-    
-        # Circular duration in seconds
-        Tcirc = np.sqrt((1 + rprs) ** 2 - b ** 2) / (np.pi * aRs) * per
-    
-        # Duration anomaly
-        d = T / Tcirc
-        
-        if not np.isnan(d):
-            break
-    
-        # Loop until we get a physical eccentricity
-    while True:
-        
-        # Draw the mean anomaly from a uniform distribution
-        theta = np.random.random() * 2 * np.pi
-        
-        # Solve the quadratic
-        A = 1 + d ** 2 * np.cos(theta) ** 2
-        B = 2 * d ** 2 * np.cos(theta)
-        C = d ** 2 - 1 
-        foo = B ** 2 - 4 * A * C
-        e1 = (B - np.sqrt(foo)) / (2 * A)
-        e2 = (B + np.sqrt(foo)) / (2 * A)
-    
-        if (e1 >= 0 and e1 <= 1) and (e2 >= 0 and e2 <= 1):
-            if np.random.random() < 0.5:
-                return e1
-            else:
-                return e2
-        elif (e1 >= 0 and e1 <= 1):
-            return e1
-        elif (e2 >= 0 and e2 <= 1):
-            return e2
-        else:
-            continue
-            
 def MinimumEccentricity(koi):
     '''
     
@@ -192,7 +129,91 @@ def MinimumEccentricity(koi):
     
     return emin
     
-kois = GetKOIs()
-e = [DrawEccentricity(koi) for koi in kois]
-pl.hist(e, bins = 50)
-pl.show()
+
+def ImpactDistribution():
+    '''
+    Plot the impact parameter distribution
+    
+    '''
+    
+    kois = GetKOIs()
+    impacts = [k.koi_impact for k in kois]
+    pl.hist(impacts, bins = 30, histtype = 'step', range = (0,1.2))
+    pl.show()
+
+def DrawTDA(koi):
+    '''
+    
+    '''
+    
+    # Measured duration in seconds
+    T = HRSEC * N(koi.koi_duration, koi.koi_duration_err1, koi.koi_duration_err2)
+
+    # Density in kg/m^3
+    mass = MSUN * N(koi.star_mass, koi.star_mass_err1, koi.star_mass_err2)
+    radius = RSUN * N(koi.star_radius, koi.star_radius_err1, koi.star_radius_err2)
+    rhos = mass / ((4 / 3.) * np.pi * radius ** 3)
+
+    # Period in seconds
+    per = DAYSEC * N(koi.koi_period, koi.koi_period_err1, koi.koi_period_err2)
+
+    # Semi-major axis in units of stellar radius
+    aRs = ((G * rhos * per ** 2.) / (3. * np.pi)) ** (1. / 3.)
+
+    # Rp/Rs
+    rprs = N(koi.koi_ror, koi.koi_ror_err1, koi.koi_ror_err2)
+
+    # Impact parameter
+    b = N(koi.koi_impact, koi.koi_impact_err1, koi.koi_impact_err2, hi = (1 + rprs))
+
+    # Circular duration in seconds
+    Tcirc = np.sqrt((1 + rprs) ** 2 - b ** 2) / (np.pi * aRs) * per
+
+    # Duration anomaly
+    TDA = T / Tcirc
+    
+    return TDA
+
+def DrawEccentricity(tda, eps = 0.001, maxruns = 9999):
+    '''
+    
+    '''
+    
+    # Loop until we get a physical eccentricity
+    diff = np.inf
+    runs = 0
+    while diff > eps:
+        e = np.random.random()
+        theta = np.random.random() * 2 * np.pi
+        tda_ = np.sqrt(1 - e ** 2) / (1 + e * np.cos(theta))
+        diff = np.abs(tda - tda_)
+        runs += 1
+        if runs > maxruns:
+            return np.nan
+    return e
+
+def EccentricityDistribution():
+    '''
+    
+    '''
+    
+    print("Getting KOI data...")
+    kois = GetKOIs()
+    
+    print("Computing the TDA...")
+    tdas = [DrawTDA(koi) for koi in kois]
+    
+    print("Sampling the eccentricity distribution...")
+    eccs = []
+    for i in tqdm(range(len(kois))):
+    
+        ecc = DrawEccentricity(tdas[i])
+        if not np.isnan(ecc):
+            eccs.append(ecc)
+    
+    # Plot!
+    print(len(eccs))
+    pl.hist(eccs, bins = 30)
+    pl.show()
+
+EccentricityDistribution()
