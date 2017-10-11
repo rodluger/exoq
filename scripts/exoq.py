@@ -13,11 +13,9 @@ from numpy.ctypeslib import ndpointer, as_ctypes
 # C library
 lib = ctypes.CDLL('tidal.so')
 _Evolve = lib.Evolve
-_Evolve.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, 
-                    ctypes.c_double, ctypes.c_double, ctypes.c_double, 
-                    ctypes.c_double,
-                    ctypes.POINTER(ctypes.c_double), 
-                    ctypes.POINTER(ctypes.c_double)]
+_Evolve.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
+                    ctypes.c_double, ctypes.c_double, ctypes.c_double,
+                    ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]
 
 # Constants (mks)
 G = 6.67428e-11
@@ -143,6 +141,181 @@ def GetKOIs():
     
     return kois
 
+def MinimumEccentricity(koi):
+    '''
+    
+    '''
+    
+    # Measured duration in hours
+    T = koi.koi_duration
+    
+    # Density in kg/m^3
+    rho = koi.koi_srho * 1.e3
+    
+    # Semi-major axis in units of stellar radius
+    aRs = ((G * rho * (koi.koi_period * DAYSEC) ** 2.) 
+            / (3. * np.pi)) ** (1. / 3.)
+    
+    # Circular duration in hours
+    Tcirc = np.sqrt((1 + koi.koi_ror) ** 2 - koi.koi_impact ** 2) \
+            / (np.pi * aRs) * koi.koi_period * 24.
+    
+    # Minimum eccentricity
+    d = T / Tcirc
+    emin = np.abs((d ** 2 - 1) / (d ** 2 + 1))
+    
+    return emin
+    
+def ImpactDistribution():
+    '''
+    Plot the impact parameter distribution
+    
+    '''
+    
+    kois = GetKOIs()
+    impacts = [k.koi_impact for k in kois]
+    pl.hist(impacts, bins = 30, histtype = 'step', range = (0,1.2))
+    pl.show()
+
+def DrawTDA(koi):
+    '''
+    
+    '''
+    
+    # Measured duration in seconds
+    T = HRSEC * N(koi.koi_duration, koi.koi_duration_err1, koi.koi_duration_err2)
+
+    # Density in kg/m^3
+    mass = MSUN * N(koi.star_mass, koi.star_mass_err1, koi.star_mass_err2)
+    radius = RSUN * N(koi.star_radius, koi.star_radius_err1, koi.star_radius_err2)
+    rhos = mass / ((4 / 3.) * np.pi * radius ** 3)
+
+    # Period in seconds
+    per = DAYSEC * N(koi.koi_period, koi.koi_period_err1, koi.koi_period_err2)
+
+    # Semi-major axis in units of stellar radius
+    aRs = ((G * rhos * per ** 2.) / (3. * np.pi)) ** (1. / 3.)
+
+    # Rp/Rs
+    rprs = N(koi.koi_ror, koi.koi_ror_err1, koi.koi_ror_err2)
+
+    # Impact parameter
+    b = N(koi.koi_impact, koi.koi_impact_err1, koi.koi_impact_err2, hi = (1 + rprs))
+
+    # Circular duration in seconds
+    Tcirc = np.sqrt((1 + rprs) ** 2 - b ** 2) / (np.pi * aRs) * per
+
+    # Duration anomaly
+    TDA = T / Tcirc
+    
+    return TDA
+
+def DrawEccentricityABC(tda, eps = 0.001, maxruns = 9999):
+    '''
+    
+    '''
+    
+    # Rejection ABC
+    diff = np.inf
+    runs = 0
+    while diff > eps:
+        e = np.random.random()
+        theta = np.random.random() * 2 * np.pi
+        tda_ = np.sqrt(1 - e ** 2) / (1 + e * np.cos(theta))
+        diff = np.abs(tda - tda_)
+        runs += 1
+        if runs > maxruns:
+            return np.nan
+    return e
+
+def PopulationEccentricityDistributionABC():
+    '''
+    
+    '''
+    
+    print("Getting KOI data...")
+    kois = GetKOIs()
+    
+    print("Computing the TDA...")
+    tdas = [DrawTDA(koi) for koi in kois]
+    
+    print("Sampling the eccentricity distribution...")
+    eccs = []
+    for i in tqdm(range(len(kois))):
+    
+        ecc = DrawEccentricityABC(tdas[i])
+        if not np.isnan(ecc):
+            eccs.append(ecc)
+    
+    # Plot!
+    print(len(eccs))
+    pl.hist(eccs, bins = 30)
+    pl.show()
+
+def IndividualEccentricityDistributionABC(tda, sig_tda, n = 1000, **kwargs):
+    '''
+    
+    '''
+    
+    samples = []
+    for i in tqdm(range(n)):
+        x = DrawEccentricityABC(tda + sig_tda * np.random.randn(), **kwargs)
+        if not np.isnan(x):
+            samples.append(x)
+    fig = pl.figure()
+    pl.hist(samples, bins = 50, histtype = 'step', color = 'k')
+    emin = np.abs((tda ** 2 - 1) / (tda ** 2 + 1))
+    pl.axvline(emin, color = 'r', ls = '--')    
+    pl.title('ABC')
+
+def LnLikeMCMC(x, **kwargs):
+    '''
+    
+    '''
+    
+    # Parameters
+    e, w = x
+    tda = kwargs['tda']
+    sig_tda = kwargs['sig_tda']
+    
+    # Hard bounds
+    if (e < 0) or (e > 1):
+        return -np.inf
+    if (w < 0) or (w > 2 * np.pi):
+        return -np.inf
+    
+    # Transit duration anomaly
+    tda_ = np.sqrt(1 - e ** 2) / (1 + e * np.cos(w))
+    
+    # Likelihood
+    return -0.5 * (tda - tda_) ** 2 / sig_tda ** 2
+
+def IndividualEccentricityDistributionMCMC(tda, sig_tda, nwalk = 10, ndim = 2, 
+                                           nsteps = 100000, nburn = 10000, 
+                                           **kwargs):
+    '''
+    
+    '''
+        
+    # Initial state
+    emin = np.abs((tda ** 2 - 1) / (tda ** 2 + 1))
+    x0 = [[emin + np.random.random() * (1 - emin), 
+           np.random.random() * 2 * np.pi] for n in range(nwalk)]
+        
+    # Run MCMC
+    sampler = emcee.EnsembleSampler(nwalk, ndim, LnLikeMCMC, 
+                                    kwargs = dict(tda = tda, 
+                                                  sig_tda = sig_tda)
+                                    )
+    for i in tqdm(sampler.sample(x0, iterations = nsteps), total = nsteps):
+        pass
+  
+    samples = sampler.chain[:,nburn:,0].reshape(-1)  
+    fig = pl.figure()
+    pl.hist(samples, bins = 50, histtype = 'step', color = 'k')
+    pl.axvline(emin, color = 'r', ls = '--')
+    pl.title('MCMC')
+
 def TidalEvolve(M, m, R, r, tau, k2, age, a, e):
     '''
     
@@ -150,18 +323,17 @@ def TidalEvolve(M, m, R, r, tau, k2, age, a, e):
     
     a = np.array([a])
     e = np.array([e])
-    _Evolve(M, m, R, r, tau, k2, age, 
-            np.ctypeslib.as_ctypes(a), np.ctypeslib.as_ctypes(e))
+    _Evolve(M, m, R, r, tau, k2, age, np.ctypeslib.as_ctypes(a), np.ctypeslib.as_ctypes(e))
     
     return a[0], e[0]
 
-def LnPrior(x, **kwargs):
+def LnPriorTidal(x, **kwargs):
     '''
     
     '''
     
     # Parameters
-    logtau, age, M, R, rR, cosi, ai, ei, w = x
+    logtau, age, M, R, rR, b, ai, ei, w = x
     koi = kwargs['koi']
     
     # Hard bounds
@@ -175,7 +347,7 @@ def LnPrior(x, **kwargs):
         return -np.inf
     elif (rR < 0):
         return -np.inf
-    elif (cosi < 0) or (cosi > 1):
+    elif (b < 0):
         return -np.inf
     elif (ai < 0):
         return -np.inf
@@ -183,12 +355,18 @@ def LnPrior(x, **kwargs):
         return -np.inf
     elif (w < 0) or (w > 2 * np.pi):
         return -np.inf
-         
+     
+    # Reject non-transiting configurations
+    # TODO: Do we need to account for the 
+    # transit probability here?
+    if b ** 2 >= (1 + rR) ** 2:
+        return -np.inf
+        
     # TODO: Better eccentricity prior?
     
     return 0.
 
-def LnLike(x, **kwargs):
+def LnLikeTidal(x, **kwargs):
     '''
     
     '''
@@ -197,12 +375,12 @@ def LnLike(x, **kwargs):
     blobs = []
     
     # Compute prior probability
-    lnprior = LnPrior(x, **kwargs)
+    lnprior = LnPriorTidal(x, **kwargs)
     if np.isinf(lnprior):
         return lnprior, blobs
     
     # Parameters
-    logtau, age, M, R, rR, cosi, ai, ei, w = x
+    logtau, age, M, R, rR, b, ai, ei, w = x
     r = rR * R
     koi = kwargs['koi']
         
@@ -223,19 +401,11 @@ def LnLike(x, **kwargs):
     # Prevent star-crossing orbits
     if a * (1 - e ** 2) <= R:
         return -np.inf, blobs
-    
-    # Reject non-transiting orbits
-    # Equation (7) in Winn (2010)
-    b = (a * cosi / R) * (1 - e ** 2) / (1 + e * np.sin(w))
-    if (b >= 1 + rR):
-        return -np.inf, blobs
-    
+        
     # Compute the transit duration for this sample
-    # Equation (14) * Equation (16) in Winn (2010)
-    sini = np.sqrt(1 - cosi ** 2)
-    arg = (R / a) * np.sqrt((1 + rR) ** 2 - b ** 2) / sini
-    fac = np.sqrt(1 - e ** 2) / (1 + e * np.sin(w))
-    T = (P / np.pi) * np.arcsin(arg) * fac
+    vc = 2 * np.pi * a / P
+    vsky = vc * (1 + e * np.cos(w)) / np.sqrt(1 - e ** 2)
+    T = 2 * np.sqrt((R + r) ** 2 - (b * R) ** 2) / vsky
     
     # Update blobs
     blobs = []
@@ -250,15 +420,15 @@ def LnLike(x, **kwargs):
 
     return lnprior + lnlike, blobs
 
-def IndividualTauDistributionMCMC(koi, nwalk = 100, nsteps = 50000, 
-                                  nburn = 10000, thin = 10, **kwargs):
+def IndividualTauDistributionMCMC(koi, nwalk = 50, nsteps = 50000, nburn = 10000, 
+                                  thin = 10, **kwargs):
     '''
     
     '''
     
     # Kwargs for likelihood function
     ll_kwargs = dict(koi = koi)
-    ndim = 9
+    ndim = 10
     nblobs = 0
     
     # Get the initial state
@@ -280,18 +450,17 @@ def IndividualTauDistributionMCMC(koi, nwalk = 100, nsteps = 50000,
     for k in range(nwalk):
         like = -np.inf
         while np.isinf(like):
-            logtau = 2 * np.random.randn()
+            logtau = 0.25 * np.random.randn()
             age = (1 + 9 * np.random.random()) * 1e9 * YEARSEC
             M = MSUN * N(koi.star_mass, koi.star_mass_err1, koi.star_mass_err2)
-            R = RSUN * N(koi.star_radius, koi.star_radius_err1, 
-                         koi.star_radius_err2)
+            R = RSUN * N(koi.star_radius, koi.star_radius_err1, koi.star_radius_err2)
             rR = N(koi.koi_ror, koi.koi_ror_err1, koi.koi_ror_err2)
-            cosi = b / aRs * (1 + 0.1 * np.random.randn())
+            b = N(koi.koi_impact, koi.koi_impact_err1, koi.koi_impact_err2)
             ai = a * (1 + 0.01 * np.abs(np.random.randn()))
-            ei = emin + np.abs(np.random.random()) * 0.1
+            ei = emin + np.random.random() * 0.01
             w = np.random.random() * 2 * np.pi 
-            x = [logtau, age, M, R, rR, cosi, ai, ei, w]
-            like, blobs = LnLike(x, **ll_kwargs)
+            x = [logtau, age, M, R, rR, b, rho, ai, ei, w]
+            like, blobs = LnLikeTidal(x, **ll_kwargs)
         x0.append(x)
         blobs0.append(blobs)
 
@@ -301,7 +470,7 @@ def IndividualTauDistributionMCMC(koi, nwalk = 100, nsteps = 50000,
               r"$M_\star$ [$M_\odot$]",
               r"$R_\star$ [$R_\odot$]",
               r"$r/R_\star$",
-              r"$\cos(\i)$",
+              r"$b$",
               r"$a_i$ [AU]", 
               r"$e_i$",
               r"$\omega$ [deg]",
@@ -312,7 +481,7 @@ def IndividualTauDistributionMCMC(koi, nwalk = 100, nsteps = 50000,
              1. / MSUN,
              1. / RSUN,
              1.,
-             1.,
+             1. / 1000.,
              1. / AUM, 
              1., 
              180. / np.pi,
@@ -323,7 +492,7 @@ def IndividualTauDistributionMCMC(koi, nwalk = 100, nsteps = 50000,
               koi.star_mass,
               koi.star_radius,
               koi.koi_ror,
-              b / aRs,
+              koi.koi_impact,
               a,
               emin,
               np.nan]
@@ -339,7 +508,7 @@ def IndividualTauDistributionMCMC(koi, nwalk = 100, nsteps = 50000,
              (0,360)]
     
     # Run MCMC
-    sampler = emcee.EnsembleSampler(nwalk, ndim, LnLike, 
+    sampler = emcee.EnsembleSampler(nwalk, ndim, LnLikeTidal, 
                                     kwargs = ll_kwargs)
     for i in tqdm(sampler.sample(x0, iterations = nsteps, blobs0 = blobs0, 
                                  thin = thin), total = nsteps):
@@ -354,8 +523,7 @@ def IndividualTauDistributionMCMC(koi, nwalk = 100, nsteps = 50000,
         samples[:,:,i] *= units[i]
     
     # Plot the chains
-    fig, ax = pl.subplots(int(np.ceil((ndim + nblobs) / 2)), 2, 
-                          figsize = (9, 7))
+    fig, ax = pl.subplots(int(np.ceil((ndim + nblobs) / 2)), 2, figsize = (9, 7))
     ax[-1,0].set_xlabel('Iteration')
     ax[-1,1].set_xlabel('Iteration')
     ax = ax.flatten()
@@ -367,39 +535,22 @@ def IndividualTauDistributionMCMC(koi, nwalk = 100, nsteps = 50000,
         if i < ndim + nblobs - 1:
             ax[i].set_xticklabels([])
         ax[i].set_rasterization_zorder(0)
-        ax[i].set_ylim(np.min(samples[:,nburn // thin:,i]), 
-                       np.max(samples[:,nburn // thin:,i]))
-    
-    # Plot the likelihood evolution if there's space
-    if (ndim + nblobs) % 2:
-        for k in range(nwalk):
-            ax[-1].plot(sampler.lnprobability[k], 
-                        lw = 1, alpha = 0.3, zorder = -1)
-        ax[-1].axvline(nburn // thin, color = 'r', lw = 1, alpha = 0.5)
-        ax[-1].set_rasterization_zorder(0)
-        ax[-1].set_ylim(np.min(sampler.lnprobability[:,nburn // thin:]), 
-                        np.max(sampler.lnprobability[:,nburn // thin:]))
-        ax[-1].set_ylabel('ln(prob)')
-    
-    # Save
+        ax[i].set_ylim(np.min(samples[:,nburn // thin:,i]), np.max(samples[:,nburn // thin:,i]))
     fig.savefig('chains.pdf', bbox_inches = 'tight', dpi = 800)
     
     # Plot the corner diagram w/ burn-in removed
     fig = corner.corner(samples[:,nburn // thin:,:].reshape(-1, ndim + nblobs), 
                         labels = labels, bins = 30, 
                         truths = truths, range = ranges)
-    
-    # Save
     fig.savefig('corner.pdf', bbox_inches = 'tight')
 
-if __name__ == '__main__':
+# Load
+try:
+    kois = pickle.load(open("kois.pickle", "rb"))
+except:
+    kois = GetKOIs()
+    pickle.dump(kois, open("kois.pickle", "wb"))
 
-    # Load
-    try:
-        kois = pickle.load(open("kois.pickle", "rb"))
-    except:
-        kois = GetKOIs()
-        pickle.dump(kois, open("kois.pickle", "wb"))
-    
-    # Run first KOI
-    IndividualTauDistributionMCMC(kois[0])
+import pdb; pdb.set_trace()
+
+IndividualTauDistributionMCMC(kois[0])
