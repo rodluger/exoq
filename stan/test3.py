@@ -1,4 +1,10 @@
-"""A simple Stan test."""
+"""
+Another Stan test.
+
+Here I regress on data from 200 'planets' to
+try to infer the dependence of the tidal
+quality factor on the planet radius.
+"""
 from collections import OrderedDict
 from utils import StanFit, normal
 import matplotlib.pyplot as pl
@@ -20,9 +26,11 @@ data {
     real e[N];
     real<lower=0> sige[N];
 
-    // Observed radius and age (no uncertainty for now)
-    real<lower=0> r[N];
-    real<lower=0> t[N];
+    // Observed radius and age, with uncertainty
+    real r[N];
+    real<lower=0> sigr[N];
+    real t[N];
+    real<lower=0> sigt[N];
 
     // Initial distribution parameters
     real mua0;
@@ -38,45 +46,54 @@ parameters {
     // The population-level variables we're trying to constrain
     real m;
     real b;
-    real<lower=0> sigQ;
+    real logsigQ;
 
     // The `true` parameters for each planet
     real Q[N];
     real a0[N];
     real e0[N];
+    real ttrue[N];
+    real rtrue[N];
 }
 model {
     // Dummy variables
-    real ahat;
-    real ehat;
+    real afinal;
+    real efinal;
+    real sigQ;
 
-    // Enforce some generous priors on a, b, and sigQ
+    // Enforce some generous priors on m, b, and logsigQ
     m ~ uniform(-10, 10);
     b ~ uniform(-10, 10);
-    sigQ ~ uniform(0.001, 1.);
+    logsigQ ~ uniform(-3, 0);
+    sigQ = 10 ^ logsigQ;
 
     // Go through the ensemble
     for (n in 1:N) {
+
+        // Enforce the prior on the radius and age
+        ttrue[n] ~ normal(t[n], sigt[n]);
+        rtrue[n] ~ normal(r[n], sigr[n]);
+
         // Enforce the prior on Q
-        Q[n] ~ normal(m * r[n] + b, sigQ);
+        Q[n] ~ normal(m * rtrue[n] + b, sigQ);
 
         // Enforce the prior on the initial conditions
         a0[n] ~ normal(mua0, siga0);
         e0[n] ~ normal(mue0, sige0);
 
         // Evolve the system
-        ahat = a0[n] - 0.1 * Q[n] * t[n];
-        ehat = e0[n] - 0.0025 * Q[n] * t[n];
+        afinal = a0[n] - 0.1 * Q[n] * ttrue[n];
+        efinal = e0[n] - 0.0025 * Q[n] * ttrue[n];
 
         // Compute the likelihood of observing `a` and `e`
-        a[n] ~ normal(ahat, siga[n]);
-        e[n] ~ normal(ehat, sige[n]);
+        a[n] ~ normal(afinal, siga[n]);
+        e[n] ~ normal(efinal, sige[n]);
     }
 }
 """
 
 
-def gen_data(m, b, sigQ, mua0, siga0, mue0, sige0):
+def gen_data(m, b, logsigQ, mua0, siga0, mue0, sige0):
     """
     Generate synthetic data.
 
@@ -84,8 +101,8 @@ def gen_data(m, b, sigQ, mua0, siga0, mue0, sige0):
     ------------------
     - a, siga: Present-day semi-major axis and uncertainty
     - e, sige: Present-day eccentricity and uncertainty
-    - r: Planet radius (known exactly)
-    - t: System age (known exactly)
+    - r, sigr: Planet radius and uncertainty
+    - t, sigt: System age and uncertainty
 
     Priors
     ------
@@ -99,10 +116,10 @@ def gen_data(m, b, sigQ, mua0, siga0, mue0, sige0):
 
     Latent variables
     ----------------
-    - m, b, sigQ: Model parameters for tidal evolution
+    - m, b, logsigQ: Model parameters for tidal evolution
                   We assume a planet's Q is drawn from
 
-                        Q ~ N(m * r + b, sigQ)
+                        Q ~ N(m * r + b, 10 ** logsigQ)
 
                   We regress on all three.
 
@@ -120,7 +137,7 @@ def gen_data(m, b, sigQ, mua0, siga0, mue0, sige0):
     r = 5 * np.random.random()
 
     # Draw Q
-    Q = normal(m * r + b, sigQ)
+    Q = normal(m * r + b, 10 ** logsigQ)
 
     # Draw the initial values
     a0 = normal(mua0, siga0)
@@ -129,18 +146,24 @@ def gen_data(m, b, sigQ, mua0, siga0, mue0, sige0):
     # Fix the uncertainty on the observed variables for now
     siga = 0.1
     sige = 0.01
+    sigt = 0.1
+    sigr = 0.1
 
     # Draw the observed variables
     a = normal(a0 - 0.1 * Q * t, siga)
     e = normal(e0 - 0.0025 * Q * t, sige)
 
-    return t, r, a, e, siga, sige, a0, e0, Q
+    # Add noise to the age and radius
+    t = normal(t, sigt)
+    r = normal(r, sigr)
+
+    return t, sigt, r, sigr, a, e, siga, sige, a0, e0, Q
 
 
 # Values we're going to try to recover
 m = 3.
 b = 2.5
-sigQ = 0.1
+logsigQ = -1
 
 # Priors we know
 mua0 = 30.
@@ -149,21 +172,24 @@ mue0 = 0.75
 sige0 = 0.05
 
 # Number of planets
-N = 200
+N = 50
 
 # Generate our fake data
 t = np.zeros(N)
 r = np.zeros(N)
 a = np.zeros(N)
 e = np.zeros(N)
+sigt = np.zeros(N)
+sigr = np.zeros(N)
 siga = np.zeros(N)
 sige = np.zeros(N)
 a0 = np.zeros(N)
 e0 = np.zeros(N)
 Q = np.zeros(N)
 for n in range(N):
-    t[n], r[n], a[n], e[n], siga[n], sige[n], a0[n], e0[n], Q[n] = \
-        gen_data(m, b, sigQ, mua0, siga0, mue0, sige0)
+    t[n], sigt[n], r[n], sigr[n], a[n], e[n], siga[n], \
+        sige[n], a0[n], e0[n], Q[n] = \
+        gen_data(m, b, logsigQ, mua0, siga0, mue0, sige0)
 
 # Plot the distributions
 fig, ax = pl.subplots(3, figsize=(4, 6))
@@ -178,13 +204,15 @@ ax[1].hist(e, histtype='step', bins=30, label='Observed')
 ax[1].legend(loc='best')
 ax[2].set_title('Tidal Q')
 ax[2].hist(Q, bins=30)
-pl.show()
+# pl.show()
 
 # Initial values
 init = [dict(m=1,
              b=1,
-             sigQ=0.1,
+             logsigQ=-1,
              Q=np.array([normal(r[n] + 1, 0.1) for n in range(N)]),
+             ttrue=t,
+             rtrue=r,
              a0=np.array([normal(mua0, siga0) for n in range(N)]),
              e0=np.array([normal(mue0, sige0) for n in range(N)]))]
 
@@ -196,7 +224,9 @@ data['siga'] = siga
 data['e'] = e
 data['sige'] = sige
 data['r'] = r
+data['sigr'] = sigr
 data['t'] = t
+data['sigt'] = sigt
 data['mua0'] = mua0
 data['siga0'] = siga0
 data['mue0'] = mue0
