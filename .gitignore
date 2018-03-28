@@ -6,3 +6,6 @@ __pycache__
 *.sm
 *.sf
 .old
+var/
+*.egg-info
+build/
